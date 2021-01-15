@@ -1,0 +1,9 @@
+# Resort to this option (PEP 517 has no support for direct installs from source),
+# this is to avoid `ERROR: Failed building wheel for ...`.
+# --no-binary :all:
+
+setuptools>=38.3.0
+numpy>=1.16,<1.17
+pandas==0.24.0
+trackhub==0.2.4
+deepTools==3.3.2

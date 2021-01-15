@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# add uniform color to the bed color field and writes bed in compressed format
+# no bed check performed
+
+if [ ! $# == 3 ]; then
+  echo "Usage: $0 [BED in] [BED out] [RGB color triplet comma separated]"
+  exit
+fi
+
+OUT=$2
+if [[ $OUT != *".gz" ]]; then
+  OUT="$2.gz"
+fi
+
+if (file $1 | grep -q compressed ) ; then
+    header=$(zcat $1 | sed -n '1p')
+    zcat $1 | tail -n+2 | awk -v c=$3 'BEGIN{FS=OFS="\t";}{print $1,$2,$3,$4,$5,$6,$7,$8,c,$10,$11,$12;}' | sed "1s/^/$header\n/g" | gzip > $OUT
+else
+    # header=$(awk 'BEGIN{FS=OFS="\t"}NR==1' $1) 
+    header=$(sed -n '1p' $1)
+    tail $1 -n+2 | awk -v c=$3 'BEGIN{FS=OFS="\t";}{print $1,$2,$3,$4,$5,$6,$7,$8,c,$10,$11,$12;}' | sed "1s/^/$header\n/g" | gzip > $OUT
+fi

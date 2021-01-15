@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Reheader bam files in a directory
+# Sequences that are identified with 1,2, etc. MT and/or any more complex identifier need to be put in a "dictionary"
+# with new old identifiers (header-mapping.txt), loop over files, reheader with samtools, and index.
+# The mapping is fetched using given assembly or passed via argument 4 (argument 3 is then ignored).
+
+# NOTE: DIR in must contain only the BAM files to be reheadered
+#       Reheadered BAM files are written to DIR out
+
+if [[ $# -lt 3 ]] || [[ $# -gt 4 ]]; then
+  echo "Usage: $0 [DIR in] [DIR out] [assembly] <mapping>"
+  exit
+fi
+
+# directory where this script resides
+PARENT=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+
+if [ -z "$4" ]; then
+    MAP=$PARENT/header-mapping-$3.txt
+    mysql --user=genome --host=genome-mysql.cse.ucsc.edu -A -N -e "select * from ucscToEnsembl;" $3 > $MAP
+else
+    MAP=$4
+fi
+
+for file in $1/*.bam; do samtools view -H $file | sed -e 's/SN:\([0-9XY]\)/SN:chr\1/' -e 's/SN:MT/SN:chrM/' > ${file%.*}-header.txt; while read new old; do sed -i "s/${old}/${new}/g" ${file%.*}-header.txt; done < $MAP && samtools reheader ${file%.*}-header.txt $file > $2/$(basename "${file%.*}").bam; done && for file in $2/*.bam; do samtools index $file; done
