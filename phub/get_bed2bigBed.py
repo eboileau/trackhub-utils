@@ -1,7 +1,6 @@
 #! /usr/bin/env python3
 
-"""Convert BED files to bigBed tracks for visualisation,
-mainly to use with the Rp-Bp ORF predictions.
+"""Convert BED files to bigBed tracks for visualisation.
 
 Note: Requires the executable "bedToBigBed" and the "chrom.sizes"
       file which can be obtained with the "fetchChromSizes" script.
@@ -9,9 +8,9 @@ Note: Requires the executable "bedToBigBed" and the "chrom.sizes"
       of chrom.sizes (UCSC), otherwise they must be re-written by
       passing the right options.
 
-      The header must match those of bed_utils.bed12_field_names
-
 Functions:
+    _glob_re
+    _read_bed
     _get_bed
     _convert
 """
@@ -23,123 +22,116 @@ import logging
 import yaml
 import json
 import csv
+import gzip
+import re
+
 import pandas as pd
 
-import pbio.misc.utils as utils
-import pbio.misc.shell_utils as shell_utils
-import pbio.misc.pandas_utils as pandas_utils
-import pbio.misc.logging_utils as logging_utils
-
-import pbio.utils.bed_utils as bed_utils
-
-import pbio.ribo.ribo_utils as ribo_utils
-import pbio.ribo.ribo_filenames as filenames
-
-from rpbp.defaults import metagene_options
+import phub.utils as utils
 
 logger = logging.getLogger(__name__)
 
 
-# use the base labels, but for display we need to adjust
-display_name_map = ribo_utils.orf_type_labels_display_name_map
-display_name_map['canonical_variant'] = 'Variant'
+# default formatting
+AutoSqlStr = '''table bedSourceSelectedFields
+"Browser extensible data selected fields."
+(
+string	chrom;	"Chromosome or scaffold"
+uint	chromStart;	"Feature start position on chromosome"
+uint	chromEnd;	"Feature end position on chromosome"
+string	name;	"Feature id"
+uint	score;	"Score"
+char[1]	strand;	"+ or -"
+uint	thickStart;	"Feature start coordinate"
+uint	thickEnd;	"Feature end coordinate"
+uint	reserved;	"RGB custom colour scheme"
+int	blockCount;	"Number of exons spanned by a feature"
+int[blockCount]	blockSizes;	"Comma separated list of exons sizes"
+int[blockCount]	chromStarts;	"Start positions of exons relative to chromStart"
+)
+'''
 
-color_mapping = {
-    'Canonical': '31,119,181',  # #1f77b4
-    'Variant': '158,218,229',  # #9edae5
-    'ncORF': '197,176,213',  # #c5b0d5
-    'uORF': '152,223,138',  # #98df8a
-    'dORF': '219,219,141',  # #dbdb8d
-    'Novel': '255,187,120',  # #ffbb78
-    'Other': '255,0,0'
-}
+default_fields = [
+    "chrom", "chromStart", "chromEnd", "name", "score", "strand",
+    "thickStart", "thickEnd", "itemRgb", "blockCount", "blockSizes", "chromStarts"
+]
 
 
-def _get_bed(input_filename, fields_to_keep, args, pretty_name):
+def _glob_re(pattern, strings):
+    return filter(re.compile(pattern).match, strings)
 
-    """Get BED12 file and adjust features. The fields must match those
-    defined in bed_utils.bed12_field_names plus fields passed via
-    [--configure-fields], however there is currently no check.
+
+def _read_bed(filename, header, args, sep='\t', **kwargs):
+    
+    """Reads a BED file into a pandas data frame. This function assumes that 
+    field names are prepended with a comment character (see pbio). Otherwise
+    a header is added as specified.
+    """
+    
+    if not args.no_header:
+        bed = pd.read_csv(filename, sep=sep, **kwargs)
+        bed.columns = [c.replace("#", "") for c in bed.columns]
+    else: 
+        bed = pd.read_csv(filename, sep=sep, header=None, **kwargs)
+        num_columns = len(bed.columns)
+        bed.columns = header[:num_columns]
+
+    # either way, make sure the first column (chrom) is treated as a string
+    chrom_name = bed.columns[0]
+    chrom_column = bed[chrom_name]
+    bed[chrom_name] = chrom_column.astype(str)
+
+    return bed
+
+
+def _get_bed(filename, output_filename, fields_to_keep, args):
+
+    """Get BED12+ file and adjust features.
     """
 
-    bed_df = bed_utils.get_bed_df(input_filename)
+    bed = _read_bed(filename, fields_to_keep, args)
     
-    msg = "No. of unique features: {}".format(len(bed_df['id'].unique()))
-    logger.info(msg)
+    # get fields
+    header = list(bed.columns)
+    chromField = header[0]
+    startField = header[1]
+    colorField = header[8]
     
-    # first keep only selected ORFs/features
-    if args.id_list is not None:
-        bed_df = bed_df[bed_df['id'].isin(args.id_list)]
-        
-    # filter by p-sites: final list may include ORFs satisfying the criteria,
-    # but not for a given replicate (e.g. >=10 p-sites in 3 replicates, but not
-    # all replicates)
-    if args.filter_by_psites:
-        bed_df = bed_df[bed_df['x_1_sum'] >= args.psite_threshold]
-
-    # Adjust chrom field
+    # adjust chrom field
     if args.add_chr:
-        bed_df['seqname'] = 'chr' + bed_df['seqname'].astype(str)
+        bed[chromField] = 'chr' + bed[chromField].astype(str)
     if args.chr_dict:
         for chrom_old, chrom_new in args.chr_dict.items():
-            seqname_m = bed_df['seqname'] == str(chrom_old)
-            bed_df.loc[seqname_m, 'seqname'] = str(chrom_new)
+            seqname_m = bed[chromField] == str(chrom_old)
+            bed.loc[seqname_m, chromField] = str(chrom_new)
     if args.chr_file:
         chr_map = pd.read_csv(args.chr_file, 
                               header=None,
                               index_col=0, 
                               squeeze=True).to_dict()
-        bed_df.replace({"seqname": chr_map}, inplace=True)
+        bed.replace({chromField: chr_map}, inplace=True)
 
-    # add display label, if orf_type is found, make sure orf_category is also in fields
-    if 'orf_type' in fields_to_keep:
-        for orf_type, labels in ribo_utils.orf_type_labels_mapping.items():
-            bed_df.loc[bed_df['orf_type'].isin(labels), 'orf_category'] = display_name_map[orf_type]
+    # sort on the chrom field, and then on the chromStart field.
+    bed.sort_values([chromField, startField], ascending=[True, True], inplace=True)
 
-        # just to make sure...
-        remove_m = bed_df['orf_type'].isna()
-        if not args.keep_other:
-            other_m = bed_df['orf_category'] == 'Other'
-            remove_m = remove_m | other_m
-        bed_df = bed_df[~remove_m]
-
-        msg = "No. of unique features (after filtering): {}".format(len(bed_df['id'].unique()))
-        logger.info(msg)
-
-        # adjust name
-        pretty_name = pretty_name + '.orfs'
-
-    # Sort on the chrom field, and then on the chromStart field.
-    bed_df.sort_values(['seqname', 'start'], ascending=[True, True], inplace=True)
-
-    # convert counts to int
-    if 'x_1_sum' in fields_to_keep:
-        bed_df = bed_df.astype({"x_1_sum": int, "x_2_sum": int, "x_3_sum": int})
-
-    if args.use_color:
-        for label, color in color_mapping.items():
-            label_m = bed_df['orf_category'] == label
-            bed_df.loc[label_m, 'color'] = color
-    elif args.keep_color:
+    if args.keep_color:
         # color field must be a string
         pass
     else:
-        bed_df['color'] = '64,64,64'
+        bed[colorField] = '64,64,64'
 
-    # remove unused fields, and get order
-    bed_df = bed_df[fields_to_keep]
+    # remove unused fields
+    bed = bed[fields_to_keep]
 
-    # Writes bed file to output directory
-    output_filename = os.path.join(args.dirloc, pretty_name)
-    pandas_utils.write_df(bed_df,
-                          str(output_filename + '.tmp.bed'),
-                          index=False,
-                          sep='\t',
-                          header=False,
-                          do_not_compress=True,
-                          quoting=csv.QUOTE_NONE)
-
-    return output_filename
+    # write bed file to output directory
+    tmp = os.path.join(args.outputDir, '{}.bed'.format(output_filename))
+    bed.to_csv(tmp,
+               sep='\t',
+               index=False,
+               header=False,
+               quoting=csv.QUOTE_NONE)
+    
+    return tmp
 
 
 def _convert(bed, bb, use_config_fields, args):
@@ -157,198 +149,154 @@ def _convert(bed, bb, use_config_fields, args):
     else:
         cmd = "bedToBigBed {} {} {}".format(bed, args.chrSizes, bb)
 
-    shell_utils.call_if_not_exists(cmd,
-                                   out_files,
-                                   in_files=in_files,
-                                   overwrite=args.overwrite,
-                                   call=True)
-    try:
-        os.remove(bed)
-        msg = "Removing: {}".format(bed)
-        logger.info(msg)
-    except OSError:
-        msg = "Could not remove: {}".format(bed)
-        logger.info(msg)
+    utils.call_if_not_exists(cmd,
+                             out_files,
+                             in_files=in_files,
+                             overwrite=args.overwrite,
+                             call=True)
+    if not args.keep:
+        try:
+            os.remove(bed)
+            msg = "Removing: {}".format(bed)
+            logger.info(msg)
+        except OSError:
+            msg = "Could not remove: {}".format(bed)
+            logger.info(msg)
 
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-                                     description="""Convert one or more BED files to bigBed 
-        files by calling the executable program 'bedToBigBed'. The executable must be 
-        available on the user's path.""")
+                                     description="""Convert BED to bigBed files by calling 
+        the executable program 'bedToBigBed'. The executable must be available on the 
+        user's path.""")
+    
+    parser.add_argument('inputDir', help="""The input directory with BED files, or path to a
+        file (txt or yaml) containing full path for each BED file to convert. The input
+        format is specified with [--input-format/-fmt]. All BED files MUST have the extension 
+        bed or bed.gz if using [--input-format glob], and names are extracted based on this 
+        information, unless a yaml file is used, in which case the key:value pair is used 
+        to assign names.""")
+    
+    parser.add_argument('outputDir', help="""The output directory. All BED files are also 
+        temporarily re-written to this location.""")
 
     parser.add_argument('chrSizes', help="The 'chrom.sizes' file for the UCSC database.")
 
-    parser.add_argument('dirloc', help="""The output directory. All BED files are 
-        temporarily re-written to this location.""")
 
-    parser.add_argument('--config', help="""The (yaml) config file for the Rp-Bp predictions.
-        If not given, then [--input-list] with [--input-type f] must be used.""", type=str)
+    parser.add_argument('-fmt', '--input-format', help="""The 'type' of input, either 'glob', 
+        'txt', or 'yaml' file. With 'glob', regex pattern can be specified with [--pattern].
+        With 'yaml', the key must be specified with [--key].""", type=str, 
+        choices=['glob', 'txt', 'yaml'], default='glob')
 
-    parser.add_argument('--input-list', help="""A space-delimited list of input files, sample 
-        names or conditions, each quoted separately. They must either be all files, or 
-        sample/condition names (in which case the [--config] option must also be used), and
-        this must be specified with the [--input-type]. Only these will be converted.""",
-                        nargs='*', required='--input-type' in sys.argv, type=str)
+    parser.add_argument('--pattern', help="""A comma-separated list of patterns used to glob
+        BED files.""", default='', type=str, nargs='*')
+    
+    parser.add_argument('--key', help="""The key to access the list of files if using
+        a yaml input file.""", default='samples', type=str)
+    
+    parser.add_argument('--skip', help="""If this flag is present then temporary BED files
+        are not generated, and the input BED files are converted directly. There is no format
+        check! Options/flags such as [--add-chr, --chr-dict, --chr-file, --keep-color, 
+        --no-header] are ignored.""", action='store_true')
 
-    parser.add_argument('--output-list', help="""A space-delimited list of output file names,
-        each quoted separately, without extension (required if [--input-type f], else ignored.""",
-                        nargs='*', type=str)
-
-    parser.add_argument('--input-type', help="""The 'type' of [--input-list], either f (files),
-        s (samples) or c (conditions).""", required='--input-list' in sys.argv, type=str,
-                        choices=['f', 's', 'c'])
-
+    parser.add_argument('--no-header', help="""Use this flag if input BED files have no
+        header. Standard BED12 fields are used if [--configure-fields] is not given.""", 
+        action='store_true')
+    
     parser.add_argument('--add-chr', help="""If this flag is present then 'chr' will be pre-pended
         to sequence names. This is done before any other changes to sequence names, so this
-        must be taken into account if giving a dictionary mapping""", action='store_true')
+        must be taken into account if giving a dictionary mapping.""", action='store_true')
 
-    parser.add_argument('-cd', '--chr-dict', help="""A dictionary mapping of sequence names found
+    parser.add_argument('--chr-dict', help="""A dictionary mapping of sequence names found
         in the data to the sequence names, as in "chrom.sizes". The format is as follows:
         '{"key/old":"value/new"}'""", type=json.loads)
 
-    parser.add_argument('-cf', '--chr-file', help="""A dictionary mapping of sequence names to 
+    parser.add_argument('--chr-file', help="""A dictionary mapping of sequence names to 
         the sequence names, as in "chrom.sizes", given as a CSV file without header: old,new.
         The file can contain any association, only those in the data will be used.""")
 
-    parser.add_argument('--configure-fields', help="""A file with comma-separated items (one per line)
-        corresponding to fields that will be included in the bigBed file. The field names must
-        correspond to the ones used the BED file. Each field name must be followed by
-        'type', 'standard field name', 'description', as needed to generate the AutoSql format (.as)
-        file describing these fields. Standard fields must be separated from any extra fields
-        by an empty line. See e.g.3 here: https://genome.ucsc.edu/goldenpath/help/bigBed.html.
-        One extra index will be created on the name field by default. If multiple BED files are
-        passed in, these will be used for all input files.""", required='--use-color' in sys.argv)
-
-    parser.add_argument('--extra-index', help="""A comma-separated string of fields to which add 
-        an index is added, passed to bedToBigBed -extraIndex. Silently ignored, unless
-        [--configure-fields] is used.""", default='name', type=str)
-
-    parser.add_argument('--use-color', help="""If this flag is present then color (field 9) fields 
-        are added. These are currently not configurable, and presumably used only with the ORF 
-        predictions from the Rp-Bp pipeline. The [--configure-field] option is required if using 
-        colour, even if no extra fields are given.""", action='store_true')
+    # TODO: [--configure-field] may not be required, and default file may be enough...
+    parser.add_argument('--extra-index', help="""A comma-separated string of fields to which 
+        an index is added, passed to bedToBigBed -extraIndex. The [--configure-field] 
+        option is required""", default='name', type=str)
 
     parser.add_argument('--keep-color', help="""If this flag is present then color fields 
-            present in the original bed files are used (string). The [--configure-field] option is 
-            required if using colour, even if no extra fields are given.""", action='store_true')
-
-    parser.add_argument('-k', '--keep-other', help="""If this flag is present then ORFs labeled
-        as "Other" will be included. They are discarded by default.""", action='store_true')
-
-    parser.add_argument('-fid', '--filter-by-id', help="""Full path to a list of ORF ids, one per 
-        line without header, to keep in the final set. This can also be a BED12 file, with the
-        "id" field.""", type=str)
-
-    parser.add_argument('-fps', '--filter-by-psites', help="""If this flag is present then keep ORFs
-        with at least [--psite-threshold] in-frame p-sites.""", action='store_true')
+        present in the original BED files are used (string), otherwise a uniform grey color 
+        is used for al files. The [--configure-field] option is required.""", action='store_true')
     
-    parser.add_argument('--psite-threshold', help="""Filter ORF predictions: keep ORFs
-        with at least [--psite-threshold] in-frame p-sites. Silently ignored if [--filter-by-psites]
-        is not set.""", type=int, default=10)
+    parser.add_argument('-asf', '--configure-fields', help="""A file with comma-separated items
+        (one per line) corresponding to fields that will be included in the bigBed file. The field 
+        names must correspond to the ones used the BED file. Each field name must be followed by
+        'type', 'standard field name', 'description', as needed to generate the AutoSql format (.as)
+        file describing these fields. Standard fields must be separated from any extra fields
+        by an empty line. See e.g. https://genome.ucsc.edu/goldenpath/help/bigBed.html.
+        One extra index will be created on the name field by default. If multiple BED files are
+        passed in, these will be used for all input files. If unused, a default file will be 
+        generated using the 'standard' field names for BED12.""", 
+        required=any(item in ['--keep-color', '--extra-index'] for item in sys.argv))
 
-    parser.add_argument('-a', '--all-replicates', help="""If this flag is present then bigBed files
-        are created for all replicates in the config file, in addition to the merged replicates or
-        conditions. By default, only the latter are created, unless the option [no-merged] is used""", 
-        action='store_true')
-
-    parser.add_argument('--no-merged', help="""If this flag is present then predictions from merged
-        replicates are ignored.""", action='store_true')
-    
-    parser.add_argument('--overwrite', help='''If this flag is present, then existing files
-        will be overwritten.''', action='store_true')
-
-    logging_utils.add_logging_options(parser)
+    utils.add_file_options(parser)
+    utils.add_logging_options(parser)
     args = parser.parse_args()
-    logging_utils.update_logging(args)
-
-    if args.input_list and not args.config and args.input_type in ['s', 'c']:
-        logger.critical("Missing [--config]")
-        return
-    if args.input_list and not args.output_list and args.input_type == 'f':
-        logger.critical("Missing [--output-list]")
-        return
-    if args.no_merged and not args.all_replicates:
-        logger.warning("""Option [--no-merged] is set without [--all-replicates], setting
-            [--all-replicates] to True.""")
-        args.all_replicates = True
-
-    msg = "[create-bigBed-tracks]: {}".format(' '.join(sys.argv))
+    utils.update_logging(args)
+    
+    msg = "[get-bed2bigBed]: {}".format(' '.join(sys.argv))
     logger.info(msg)
-
-    if args.config:
-        config = yaml.load(open(args.config), Loader=yaml.FullLoader)
-
-        required_keys = [
-            'riboseq_data',
-            'riboseq_samples',
-            'riboseq_biological_replicates'
-        ]
-        utils.check_keys_exist(config, required_keys)
-
-        # TODO add check for options when not all orf fields are used
-
-        sample_name_map = ribo_utils.get_sample_name_map(config)
-        condition_name_map = ribo_utils.get_condition_name_map(config)
-        
-    # check if we filter the list of ORFs
-    args.id_list = None
-    if args.filter_by_id:
-        # check if bed or text file
-        id_list = bed_utils.read_bed(args.filter_by_id)
-        if len(id_list.columns) > 1:
-            try:
-                id_list = id_list.id.unique()
-            except:
-                msg = 'Using [--filter-by-id], but BED12+ file does not contain id field!'
-                logger.critical(msg)
-        else:
-            id_list = set(open(args.filter_by_id).read().split())
-        args.id_list = id_list
-        
-    files_only = False
-    sample_names = {}
-    condition_names = {}
-    if args.input_list:
-        if args.input_type == 's':
-            logger.warning("""Using --input-type s, setting [--all-replicates] to True, and 
-                ignoring merged replicates.""")
-            args.all_replicates = True
-            args.no_merged = True
-            sample_names = {name: [name] for name in args.input_list}
-        elif args.input_type == 'c':
-            logger.warning("""Using --input-type c, setting [--no-merged] to False, and 
-                ignoring replicates.""")
-            args.all_replicates = False
-            args.no_merged = False
-            condition_names = {name: [name] for name in args.input_list}
-        else:
-            logger.warning("""Using --input-type f, ignoring replicate options.""")
-            files_only = True
-    else:
-        sample_names = config['riboseq_samples']
-        condition_names = ribo_utils.get_riboseq_replicates(config)
-
-    if not files_only and args.output_list:
-        msg = "[--output-list] will be ignored"
-        logger.warning(msg)
-
+    
+    # check that stand-alone executable(s) are callable
+    programs = ['bedToBigBed']
+    utils.check_programs_exist(programs)
+    
     # check output path
-    if os.path.exists(args.dirloc):
-        args.dirloc = os.path.join(args.dirloc, '')
+    if os.path.exists(args.outputDir):
+        args.outputDir = os.path.join(args.outputDir, '')
     else:
-        msg = "Invalid output path or wrong permission: {}. Terminating.".format(args.dirloc)
-        raise OSError(msg)
-
-    use_config_fields = {}
+        msg = "Invalid output path or wrong permission: {}. Terminating.".format(args.outputDir)
+        raise OSError(msg)    
+    
+    # input format - fetch BED files
+    if args.input_format == 'glob': 
+        filenames = list(_glob_re(r'.*(bed|bed.gz)', os.listdir(args.inputDir)))
+        match = r'.*({}).*'.format('|'.join(args.pattern))
+        filenames = list(_glob_re(match, filenames))
+        filenames = [os.path.join(args.inputDir, f) for f in filenames]
+    elif args.input_format == 'txt':
+        filenames = pd.read_csv(args.inputDir,
+                                header=None,
+                                usecols=[0],
+                                names=['f']).f.to_list()
+    elif args.input_format == 'yaml':
+        config = yaml.load(open(args.inputDir), Loader=yaml.FullLoader)
+        try:
+            filenames = list(config[args.key].values())
+            fileMapping = config[args.key]
+        except:
+            msg = 'Missing/wrong key: [--input-format yaml] but [--key] is wrong!'
+            raise KeyError(msg)
+            
+    if not args.input_format == 'yaml':
+        fileMapping = {}
+        for f in filenames:
+            # TODO: interaction POSIX - Windows styled path...?
+            outputFile = os.path.basename(f)
+            if outputFile.endswith('gz'):
+                outputFile = os.path.splitext(os.path.splitext(outputFile)[0])[0]
+            else:
+                outputFile = os.path.splitext(outputFile)[0]
+            fileMapping[outputFile] = f
+            
     # generate an AutoSql format (.as) file describing the fields
+    as_file = args.outputDir + 'SelectedFields.as'
+    use_config_fields = {}
+    use_config_fields['as_file'] = as_file
     if args.configure_fields:
+        msg = "Configuring fields using {}.".format(args.configure_fields)
+        logger.info(msg)
         fields_to_keep = []
         extra_fields = []
         f = open(args.configure_fields, 'r')
         lines = f.readlines()
         f.close()
-        as_file = args.dirloc + 'SelectedFields.as'
         f = open(str(as_file), 'w')
         f.write("{} {}\n".format("table", "bedSourceSelectedFields"))
         f.write('''"{}"\n'''.format("Browser extensible data selected fields."))
@@ -373,96 +321,38 @@ def main():
             fields_to_keep += extra_fields
         f.write("{}\n".format(")"))
         f.close()
-        use_config_fields['as_file'] = as_file
         use_config_fields['bed_type'] = bed_type
     else:
-        fields_to_keep = bed_utils.bed12_field_names # not sure what happens here ...
-        msg = """Currently no default fields, the [--configure-fields] option 
-              must be used. Terminating."""
-        logger.critical(msg)
-
-    # TODO add name to call _get_bed, use base file name
-    if files_only:
-        for bed_file, output_file in zip(args.input_list, args.output_list):
-            if not os.path.exists(bed_file):
-                msg = "Could not find the bed file: {}. Terminating.".format(bed_file)
-                raise FileNotFoundError(msg)
-            bed_file_name = _get_bed(bed_file, fields_to_keep, args, output_file)
-            bed = bed_file_name + '.tmp.bed'
-            bb = bed_file_name + '.bb'
-            _convert(bed, bb, use_config_fields, args)
-
-        return
-
-    note_str = config.get('note', None)
-    is_unique = not ('keep_riboseq_multimappers' in config)
-    fraction = config.get('smoothing_fraction', None)
-    reweighting_iterations = config.get('smoothing_reweighting_iterations', None)
-
-    if args.all_replicates:
-        
-        logger.info("Processing replicates.")
-        for name in sorted(sample_names.keys()):
-
-            msg = "Processing sample: {}".format(name)
-            logger.info(msg)
-
-            lengths, offsets = ribo_utils.get_periodic_lengths_and_offsets(config,
-                                                                               name,
-                                                                               is_unique=is_unique,
-                                                                               default_params=metagene_options)
-
-            predicted_orfs = filenames.get_riboseq_predicted_orfs(config['riboseq_data'],
-                                                                  name,
-                                                                  length=lengths,
-                                                                  offset=offsets,
-                                                                  is_unique=is_unique,
-                                                                  note=note_str,
-                                                                  fraction=fraction,
-                                                                  reweighting_iterations=reweighting_iterations,
-                                                                  is_filtered=True)
-
-            if not os.path.exists(predicted_orfs):
-                msg = "Name: {}, file: {}".format(name, predicted_orfs)
-                raise FileNotFoundError(msg)
-
-            pretty_name = sample_name_map[name]
-            bed_file_name = _get_bed(predicted_orfs, fields_to_keep, args, pretty_name)
-            bed = bed_file_name + '.tmp.bed'
-            bb = bed_file_name + '.bb'
-            _convert(bed, bb, use_config_fields, args)
-
-    # the merged replicates or conditions are always created, unless no_merged is set
-    if args.no_merged:
-        return
-    
-    logger.info("Processing merged replicates.")
-    lengths = None
-    offsets = None
-    for name in sorted(condition_names.keys()):
-
-        msg = "Processing condition: {}".format(name)
+        msg = """Using default fields for BED12."""
         logger.info(msg)
-
-        predicted_orfs = filenames.get_riboseq_predicted_orfs(config['riboseq_data'],
-                                                              name,
-                                                              length=lengths,
-                                                              offset=offsets,
-                                                              is_unique=is_unique,
-                                                              note=note_str,
-                                                              fraction=fraction,
-                                                              reweighting_iterations=reweighting_iterations,
-                                                              is_filtered=True)
-
-        if not os.path.exists(predicted_orfs):
-            msg = "Name: {}, file: {}".format(name, predicted_orfs)
-            raise FileNotFoundError(msg)
-
-        pretty_name = condition_name_map[name]
-        bed_file_name = _get_bed(predicted_orfs, fields_to_keep, args, pretty_name)
-        bed = bed_file_name + '.tmp.bed'
-        bb = bed_file_name + '.bb'
-        _convert(bed, bb, use_config_fields, args)
+        with open(as_file, "w") as f:
+            f.write(f'{AutoSqlStr}')
+        use_config_fields['bed_type'] = 'bed12'
+        fields_to_keep = default_fields
+        
+    # convert to bigBed directly...
+    if args.skip:
+        msg = """Using [--skip] and converting input files. 
+        All fine-grined formatting options are ignored silently!"""
+        for newBed, oldBed in fileMapping.items():
+            if not os.path.exists(oldBed):
+                msg = "Could not find the BED file: {}. Terminating.".format(oldBed)
+                raise FileNotFoundError(msg)
+            _convert(oldBed, 
+                     os.path.join(args.outputDir, '{}.bb'.format(newBed)), 
+                     use_config_fields, 
+                     args)
+    #... or prepare BED files prior to convert to bigBed.
+    else:
+        for newBed, oldBed in fileMapping.items():
+            if not os.path.exists(oldBed):
+                msg = "Could not find the BED file: {}. Terminating.".format(oldBed)
+                raise FileNotFoundError(msg)
+            filename = _get_bed(oldBed, newBed, fields_to_keep, args)
+            _convert(filename, 
+                     os.path.join(args.outputDir, '{}.bb'.format(newBed)), 
+                     use_config_fields, 
+                     args)
 
 
 if __name__ == '__main__':
