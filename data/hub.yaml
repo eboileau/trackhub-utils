@@ -1,0 +1,102 @@
+
+# Trackhub default config
+# 1. Track hub definition
+# 2. File location and settings
+# 3. Grouping tracks into sets and hierarchies: 
+#    - superTrack container: when the tracks share no specific configuration and you mostly want to show them together
+#    - composite container: when the tracks are expected to be configured together or have an internal subgrouping. TODO
+#    - multiWig container: when the tracks are all in signal format and it makes sense to overlay them TODO
+
+
+# 1. Track hub definition
+hub: MyHub
+shortLabel: 'Short label for my Hub'
+longLabel: 'Long label for my Hub, if empty shortLabel will be used'
+genomesFile: hg38
+email: boileau@uni-heidelberg.de
+
+# 2. File location and settings
+# For all settings, see https://genome.ucsc.edu/goldenpath/help/trackDb/trackDbHub.html
+
+# bigBed files - key is used as track name 
+bigBedFiles:
+ btrack1: /path/to/file1.bb
+ btrack2: /path/to/file2.bb
+ btrack3: /path/to/file3.bb
+# global settings for bigBed files
+# some settings must be defined globally only, such as trackType
+# all parameters must match the known UCSC parameters and their supported formats
+bigBedGlobalSettings:
+ trackType: 'bigBed 12 + .'
+ visibility: 'full'
+ itemRgb: 'on'
+ spectrum: 'on'
+ searchIndex: 'name'
+# file-specific settings 
+bigBedFileSettings:
+ btrack1:
+  shortLabel: "Short label for btrack1"
+  longLabel: "Long label for btrack1 with more details"
+  searchIndex: 'name,gene'
+  maxItems: 25
+ btrack2:
+  shortLabel: "Short label for btrack2"
+ 
+# bigWig files - key is used as track name 
+bigWigFiles:
+ wtrack1: /path/to/file1.bw
+ wtrack2: /path/to/file2.bw
+ wtrack3: /path/to/file3.bw
+# global settings for bigWig files
+# some settings must be defined globally only, such as trackType
+# all parameters must match the known UCSC parameters and their supported formats
+bigWigGlobalSettings:
+ trackType: 'bigWig'
+ visibility: 'full'
+ maxHeightPixels: '8:50:128'
+ autoScale: 'on'
+# file-specific settings 
+bigWigFileSettings:
+ wtrack1:
+  shortLabel: "Short label for wtrack1"
+  gridDefault: 'on'
+  graphTypeDefault: 'bar'
+  color: '128,0,0'
+  viewLimits: '-2:2'
+ wtrack2:
+  shortLabel: "Short label for wtrack2"
+  color: '128,0,0'
+  viewLimits: '-2:2'
+ wtrack3:
+  shortLabel: "Short label for wtrack3"
+  color: '65,65,65'
+  viewLimits: '0:100'
+  
+# 3. Grouping tracks into sets and hierarchies
+# 3.1 superTrack container
+
+# superTracks - key is used as superTrack name 
+superTracks:
+ super1:
+  - btrack1
+  - btrack2
+  - wtrack1
+  - wtrack2
+ super2:
+  - btrack3
+  - wtrack3
+ 
+superTrackSettings:
+ super1:
+  shortLabel: "Short label super1"
+  longLabel: "This superTrack contains files indexed by 1 and 2"
+ super2:
+  shortLabel: "Short label super2"
+  longLabel: "This superTrack contains files indexed by 3"
+ 
+ 
+ 
+ 
+ 
+
+  

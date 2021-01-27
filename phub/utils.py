@@ -22,7 +22,7 @@ def add_file_options(parser):
 
     file_options = parser.add_argument_group('file options')
 
-    file_options.add_argument('-o',, '--overwrite', help="""If this flag is present, then 
+    file_options.add_argument('-o', '--overwrite', help="""If this flag is present, then 
         existing files will be overwritten.""", action='store_true')
 
     file_options.add_argument('-k', '--keep', help="""If this flag is present, then 
@@ -409,5 +409,37 @@ def call_if_not_exists(cmd, out_files, in_files=[], overwrite=False, call=True,
     return ret_code
 
 
+# utils
+
+
+def check_keys_exist(d, keys):
+    """ This function ensures the given keys are present in the dictionary. It
+        does not other validate the type, value, etc., of the keys or their
+        values. If a key is not present, a KeyError is raised.
+
+        The motivation behind this function is to verify that a config dictionary
+        read in at the beginning of a program contains all of the required values.
+        Thus, the program will immediately detect when a required config value is
+        not present and quit.
+
+        Input:
+            d (dict) : the dictionary
+
+            keys (list) : a list of keys to check
+        Returns:
+            list of string: a list of all programs which are not found
+
+        Raises:
+            KeyError: if any of the keys are not in the dictionary
+    """
+    missing_keys = [k for k in keys if k not in d]
+
+    
+    if len(missing_keys) > 0:
+        missing_keys = ' '.join(missing_keys)
+        msg = "The following keys were not found: " + missing_keys
+        raise KeyError(msg)
+
+    return missing_keys
 
 

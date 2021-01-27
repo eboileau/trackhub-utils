@@ -35,22 +35,14 @@ Prepare the indexed binary files (bigBed, bigWig) by running one of the followin
 These scripts are wrapper to Genome Browser application binaries or `deepTools` executables such as `bamCoverage`. For more information, use the 
 `--help\-h` option.
 
-TODO:
-- clean `get_bed2bigBed.py`, `get_bam2bigWig.py`, and `get_bedGraph2bigWig.py`.
-- go back to pyproc and rewrite `create_bigBed_tracks.py` such that it is only for rpbp output, which can be then used with `get_bed2bigBed.py` here. This
-splits the code in 2, but then each part is contained, 1 for rpbp, 2 for all.
-- for `get_bed2bigBed.py`, we do not use pbio, and/or assume bed fields, etc.
-- then , create base python script to create trackDB (see bash script) as before (using args?), then add additional option from config
-- can we call external script in python such that rackhub classes are seen??????
-
-- option: add gtf2bed12, bed62bed12, etc. or pep tobed, etc....???!
-
 
 
 ### Prerequisites
 
 Pinned version of selected dependencies are listed in the `requirements.txt` file for reproducible installation,
 in particular the Python package `trackhub` and `deepTools`.
+
+Note: it may be a good idea to re-install the `trackhub` package from latest `pip install git+git://github.com/daler/trackhub@master`.
 
 A number of UCSC Genome Browser application binaries for stand-alone use are also required and can be copied
 using the script `copy_ucsc_exe`.

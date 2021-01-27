@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-"""Convert BED files to bigBed tracks for visualisation.
+"""Convert BED12+ files to bigBed tracks for visualisation.
 
 Note: Requires the executable "bedToBigBed" and the "chrom.sizes"
       file which can be obtained with the "fetchChromSizes" script.
@@ -125,13 +125,18 @@ def _get_bed(filename, output_filename, fields_to_keep, args):
 
     # write bed file to output directory
     tmp = os.path.join(args.outputDir, '{}.bed'.format(output_filename))
-    bed.to_csv(tmp,
-               sep='\t',
-               index=False,
-               header=False,
-               quoting=csv.QUOTE_NONE)
+    if os.path.exists(tmp) and not args.overwrite:
+        msg = "Temporary output file {} already exists. Skipping.".format(tmp)
+        logger.warning(msg)
+    else:
+        bed.to_csv(tmp,
+                   sep='\t',
+                   index=False,
+                   header=False,
+                   quoting=csv.QUOTE_NONE)
     
     return tmp
+
 
 
 def _convert(bed, bb, use_config_fields, args):
@@ -332,8 +337,7 @@ def main():
         
     # convert to bigBed directly...
     if args.skip:
-        msg = """Using [--skip] and converting input files. 
-        All fine-grined formatting options are ignored silently!"""
+        msg = """Using [--skip] and directly converting input files!"""
         for newBed, oldBed in fileMapping.items():
             if not os.path.exists(oldBed):
                 msg = "Could not find the BED file: {}. Terminating.".format(oldBed)
