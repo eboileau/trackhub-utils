@@ -9,6 +9,7 @@ Functions:
 import sys
 import os
 import glob
+import re
 import argparse
 import logging
 import pandas as pd
@@ -93,7 +94,7 @@ def main():
     
     # input format - fetch BAM files
     if args.input_format == 'glob': 
-        filenames = list(_glob_re(r'.*(bam)', os.listdir(args.inputDir)))
+        filenames = list(_glob_re(r'.*(bam$)', os.listdir(args.inputDir)))
         match = r'.*({}).*'.format('|'.join(args.pattern))
         filenames = list(_glob_re(match, filenames))
         filenames = [os.path.join(args.inputDir, f) for f in filenames]
