@@ -3,6 +3,7 @@ __pycache__
 .eggs
 
 *bak
+*log
 
 .ipynb_checkpoints
 

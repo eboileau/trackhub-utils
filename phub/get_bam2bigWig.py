@@ -33,6 +33,10 @@ def _get_args(args):
     return final_options_str
 
 
+def _glob_re(pattern, strings):
+        return filter(re.compile(pattern).match, strings)
+
+
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                      description="""Run bamCoverage on a set of files.""")
